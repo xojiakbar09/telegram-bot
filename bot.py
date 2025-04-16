@@ -1,55 +1,52 @@
-import logging
 import asyncio
-from aiogram import Bot, Dispatcher, types
-from aiogram.fsm.storage.memory import MemoryStorage
+import logging
+from aiogram import Bot, Dispatcher, F
+from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from handlers import user_handlers, admin_handlers
-from database import init_models, check_admin_data
-from settings import (
-    BOT_TOKEN, 
-    LOGGING_CONFIG, 
-    BOT_VERSION,
-    BOT_NAME
-)
-import logging.config
+from database import create_tables, check_admin_data
+import os
+from dotenv import load_dotenv
 
-# Loglarni sozlash
-logging.config.dictConfig(LOGGING_CONFIG)
-logger = logging.getLogger(__name__)
+# .env faylidan BOT_TOKEN ni o'qish
+load_dotenv()
+TOKEN = os.getenv('BOT_TOKEN')
+
+# Logging sozlamalari
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    filename='logs/bot.log'
+)
 
 # Bot va Dispatcher yaratish
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+bot = Bot(
+    token=TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
+dp = Dispatcher()
 
 # Handlerlarni ro'yxatdan o'tkazish
 dp.include_router(admin_handlers.router)
 dp.include_router(user_handlers.router)
 
-# Botni ishga tushirish
+# Asosiy funksiya
 async def main():
-    logger.info(f"Bot ishga tushirilmoqda... ({BOT_NAME} v{BOT_VERSION})")
+    logging.info("Bot ishga tushirilmoqda...")
     
-    # Ma'lumotlar bazasini yaratish
-    try:
-        await init_models()
-        logger.info("Ma'lumotlar bazasi muvaffaqiyatli yaratildi")
-    except Exception as e:
-        logger.error(f"Ma'lumotlar bazasini yaratishda xatolik: {e}")
-        return
+    # Ma'lumotlar bazasi jadvallarini yaratish
+    await create_tables()
     
-    try:
-        # Admin ma'lumotlarini tekshirish
-        await check_admin_data()
-        
-        await dp.start_polling(bot)
-    except Exception as e:
-        logger.error(f"Botni ishga tushirishda xatolik: {e}")
-    finally:
-        await bot.session.close()
+    # Admin ma'lumotlarini tekshirish
+    await check_admin_data()
+    
+    # Botni ishga tushirish
+    await dp.start_polling(bot)
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Bot to'xtatildi!")
+        logging.info("Bot to'xtatildi")
+    except Exception as e:
+        logging.error(f"Xatolik yuz berdi: {e}")

@@ -3,7 +3,16 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy import Column, Integer, String, Text, Boolean, ForeignKey, DateTime
 from datetime import datetime
 from sqlalchemy.sql import select
+import os
 
+# SQLite uchun URL
+DATABASE_URL = "sqlite+aiosqlite:///anime_bot.db"
+
+# Engine va Session yaratish
+engine = create_async_engine(DATABASE_URL, echo=True)
+async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+# Base class yaratish
 Base = declarative_base()
 
 class User(Base):
@@ -21,15 +30,15 @@ class Anime(Base):
     __tablename__ = 'animes'
     
     id = Column(Integer, primary_key=True)
-    title = Column(String(200), nullable=False)
-    description = Column(Text)
-    genre = Column(String(100))
-    code = Column(String(50), unique=True)
-    country = Column(String(100))
-    language = Column(String(50))
-    image_url = Column(String(500))
+    title = Column(String, nullable=False)
+    description = Column(String)
+    genre = Column(String)
+    country = Column(String)
+    language = Column(String)
+    code = Column(String, unique=True)
+    image_url = Column(String)
     views = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
 
 class Episode(Base):
     __tablename__ = 'episodes'
@@ -37,58 +46,43 @@ class Episode(Base):
     id = Column(Integer, primary_key=True)
     anime_id = Column(Integer, ForeignKey('animes.id'))
     episode_number = Column(Integer)
-    video_file_id = Column(String(500))
+    video_file_id = Column(String)
     views = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
 
 class Admin(Base):
     __tablename__ = 'admins'
     
     id = Column(Integer, primary_key=True)
-    username = Column(String, nullable=True)
-    phone_number = Column(String, nullable=True)
-    card_number = Column(String, nullable=True)
+    username = Column(String)
+    phone_number = Column(String)
+    card_number = Column(String)
     vip_price = Column(Integer, default=50000)
-    studio_name = Column(String(200))
 
 class Channel(Base):
     __tablename__ = 'channels'
     
     id = Column(Integer, primary_key=True)
-    channel_id = Column(String(100), unique=True)
-    title = Column(String(200))
-    required = Column(Boolean, default=True)
+    channel_id = Column(String, unique=True)
+    channel_url = Column(String)
+    channel_name = Column(String)
+    added_date = Column(DateTime, default=datetime.now)
 
 class VIPUser(Base):
     __tablename__ = 'vip_users'
     
     id = Column(Integer, primary_key=True)
-    user_id = Column(String(100), unique=True)
+    user_id = Column(String, unique=True)
     is_vip = Column(Boolean, default=False)
     expire_date = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    payment_amount = Column(Integer)
-    payment_date = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.now)
 
-# Database engine va session yaratish
-engine = create_async_engine(
-    'sqlite+aiosqlite:///anime_database.db',
-    echo=True
-)
-
-async_session = sessionmaker(
-    engine, 
-    class_=AsyncSession, 
-    expire_on_commit=False
-)
-
-# Database yaratish uchun funksiya
-async def init_models():
+# Ma'lumotlar bazasi jadvallarini yaratish funksiyasi
+async def create_tables():
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)  # Eski bazani o'chirish
-        await conn.run_sync(Base.metadata.create_all)  # Yangi baza yaratish
+        await conn.run_sync(Base.metadata.create_all)
 
-# Session olish uchun funksiya
+# Ma'lumotlar bazasi sessiyasini yaratish uchun kontekst menejeri
 async def get_session() -> AsyncSession:
     async with async_session() as session:
         return session
@@ -108,3 +102,6 @@ async def check_admin_data():
             )
             session.add(new_admin)
             await session.commit()
+
+# Funksiyalarni export qilish
+__all__ = ['create_tables', 'get_session', 'check_admin_data', 'Base', 'User', 'Anime', 'Episode', 'Admin', 'Channel', 'VIPUser']

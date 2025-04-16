@@ -3,7 +3,7 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, FSInputFile
-from database import async_session, Anime, Episode, Admin, User, VIPUser
+from database import async_session, Anime, Episode, Admin, User, VIPUser, Channel
 import os
 from sqlalchemy import select, delete, func
 from sqlalchemy.sql import func
@@ -31,6 +31,7 @@ class AdminStates(StatesGroup):
     waiting_for_user_id_remove = State()
     waiting_for_phone = State()
     waiting_for_card = State()
+    waiting_for_channel = State()
 
 @router.message(F.text == "panel")
 async def admin_panel(message: types.Message):
@@ -712,5 +713,148 @@ async def process_add_card(message: types.Message, state: FSMContext):
         )
     
     await state.clear()
+
+@router.message(Command("kanal"))
+async def channel_settings_command(message: types.Message):
+    if str(message.from_user.id) not in os.getenv("ADMINS", "").split(","):
+        await message.answer("❌ Sizda admin huquqlari yo'q!")
+        return
+        
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="➕ Kanal qo'shish", callback_data="add_channel"),
+                InlineKeyboardButton(text="🗑 Kanal o'chirish", callback_data="remove_channel")
+            ],
+            [
+                InlineKeyboardButton(text="📋 Kanallar ro'yxati", callback_data="list_channels")
+            ]
+        ]
+    )
+    
+    await message.answer(
+        "📢 KANAL SOZLAMALARI\n\n"
+        "Quyidagi amallardan birini tanlang:",
+        reply_markup=keyboard
+    )
+
+@router.callback_query(F.data == "add_channel")
+async def add_channel_start(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AdminStates.waiting_for_channel)
+    await callback.message.edit_text(
+        "📢 Yangi kanal qo'shish\n\n"
+        "Kanal usernameni yuboring\n"
+        "Masalan: @channel_username"
+    )
+
+@router.message(AdminStates.waiting_for_channel)
+async def process_add_channel(message: types.Message, state: FSMContext):
+    channel_username = message.text
+    if not channel_username.startswith("@"):
+        await message.answer("❌ Kanal username noto'g'ri formatda! @ bilan boshlangan username kiriting.")
+        return
+    
+    try:
+        # Kanal ma'lumotlarini olish
+        channel = await bot.get_chat(channel_username)
+        
+        async with async_session() as session:
+            # Kanal mavjudligini tekshirish
+            existing_channel = await session.execute(
+                select(Channel).where(Channel.channel_id == str(channel.id))
+            )
+            if existing_channel.scalar_one_or_none():
+                await message.answer("❌ Bu kanal allaqachon qo'shilgan!")
+                await state.clear()
+                return
+            
+            # Yangi kanal qo'shish
+            new_channel = Channel(
+                channel_id=str(channel.id),
+                channel_url=channel_username,
+                channel_name=channel.title
+            )
+            session.add(new_channel)
+            await session.commit()
+        
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📋 Kanallar ro'yxati", callback_data="list_channels")]
+            ]
+        )
+        
+        await message.answer(
+            f"✅ Kanal muvaffaqiyatli qo'shildi!\n\n"
+            f"📢 Kanal: {channel.title}\n"
+            f"🔗 Username: {channel_username}",
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        await message.answer(
+            "❌ Xatolik yuz berdi!\n\n"
+            "Sabablari:\n"
+            "• Kanal topilmadi\n"
+            "• Kanal username noto'g'ri"
+        )
+    
+    await state.clear()
+
+@router.callback_query(F.data == "list_channels")
+async def list_channels(callback: types.CallbackQuery):
+    async with async_session() as session:
+        result = await session.execute(select(Channel))
+        channels = result.scalars().all()
+        
+        if not channels:
+            await callback.message.edit_text(
+                "❌ Hozircha kanallar qo'shilmagan!",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[[
+                        InlineKeyboardButton(text="➕ Kanal qo'shish", callback_data="add_channel")
+                    ]]
+                )
+            )
+            return
+        
+        text = "📢 KANALLAR RO'YXATI:\n\n"
+        keyboard = []
+        
+        for i, channel in enumerate(channels, 1):
+            text += f"{i}. {channel.channel_name}\n"
+            text += f"└ {channel.channel_url}\n\n"
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"🗑 {channel.channel_name}ni o'chirish", 
+                    callback_data=f"delete_channel_{channel.channel_id}"
+                )
+            ])
+        
+        keyboard.append([
+            InlineKeyboardButton(text="➕ Kanal qo'shish", callback_data="add_channel")
+        ])
+        
+        await callback.message.edit_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+        )
+
+@router.callback_query(lambda c: c.data.startswith('delete_channel_'))
+async def delete_channel(callback: types.CallbackQuery):
+    channel_id = callback.data.split('_')[2]
+    
+    async with async_session() as session:
+        await session.execute(
+            delete(Channel).where(Channel.channel_id == channel_id)
+        )
+        await session.commit()
+        
+        await callback.message.edit_text(
+            "✅ Kanal muvaffaqiyatli o'chirildi!",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[
+                    InlineKeyboardButton(text="📋 Kanallar ro'yxati", callback_data="list_channels")
+                ]]
+            )
+        )
 
 # Yangi funksiyalar... 

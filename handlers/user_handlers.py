@@ -3,14 +3,67 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from database import async_session, Anime, VIPUser, Admin, Episode
+from database import async_session, Anime, VIPUser, Admin, Episode, Channel
 from states.states import AnimeStates
 from utils.api_client import get_anime_info
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy import select
 import os
+from collections import defaultdict
+from typing import Dict, List
 
 router = Router()
+
+# Foydalanuvchilar xabarlarini kuzatish uchun dictionary
+user_messages: Dict[int, List[datetime]] = defaultdict(list)
+# Bloklangan foydalanuvchilar va ularning blok vaqti
+blocked_users: Dict[int, datetime] = {}
+
+# Xabarlarni tekshirish funksiyasi
+async def check_message_limit(user_id: int) -> bool:
+    current_time = datetime.now()
+    
+    # Agar foydalanuvchi bloklangan bo'lsa
+    if user_id in blocked_users:
+        if current_time < blocked_users[user_id]:
+            remaining_time = int((blocked_users[user_id] - current_time).total_seconds())
+            return False, remaining_time
+        else:
+            # Blokdan chiqarish
+            del blocked_users[user_id]
+            user_messages[user_id].clear()
+    
+    # 5 soniyadan eski xabarlarni o'chirish
+    user_messages[user_id] = [
+        msg_time for msg_time in user_messages[user_id]
+        if current_time - msg_time <= timedelta(seconds=5)
+    ]
+    
+    # Yangi xabarni qo'shish
+    user_messages[user_id].append(current_time)
+    
+    # 5 soniya ichida 5 tadan ko'p xabar tekshirish
+    if len(user_messages[user_id]) > 5:
+        # Foydalanuvchini 20 soniyaga bloklash
+        blocked_users[user_id] = current_time + timedelta(seconds=20)  # 50 soniya o'rniga 20 soniya
+        return False, 20  # 50 o'rniga 20 qaytaramiz
+    
+    return True, 0
+
+# Xar bir xabar uchun middleware
+@router.message()
+async def message_handler(message: types.Message):
+    can_send, wait_time = await check_message_limit(message.from_user.id)
+    
+    if not can_send:
+        await message.answer(
+            f"❌ Siz juda ko'p so'rov jo'natdingiz!\n"
+            f"⏳ Iltimos, {wait_time} soniyadan keyin qayta urinib ko'ring."
+        )
+        return False
+    
+    # Agar cheklovlar o'tsa, xabarni keyingi handlerga o'tkazish
+    return True
 
 class SearchForm(StatesGroup):
     query = State()
@@ -22,6 +75,16 @@ class UserStates(StatesGroup):
 
 @router.message(Command("start"))
 async def start_command(message: types.Message):
+    # Obuna tekshirish
+    if not await check_subscription(message.from_user.id):
+        text = (
+            "👋 Botdan foydalanish uchun quyidagi kanallarga obuna bo'ling:\n\n"
+            "Obuna bo'lgach, \"✅ Tekshirish\" tugmasini bosing!"
+        )
+        keyboard = await get_channels_keyboard()
+        await message.answer(text, reply_markup=keyboard)
+        return
+    
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -51,6 +114,13 @@ async def start_command(message: types.Message):
 
 @router.callback_query(F.data == "search")
 async def search_menu(callback: types.CallbackQuery):
+    # Obuna tekshirish
+    if not await check_subscription(callback.from_user.id):
+        text = "👋 Botdan foydalanish uchun quyidagi kanallarga obuna bo'ling:"
+        keyboard = await get_channels_keyboard()
+        await callback.message.edit_text(text, reply_markup=keyboard)
+        return
+    
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -218,18 +288,20 @@ async def back_to_menu(callback: types.CallbackQuery):
 # Anime qidirish uchun handler
 @router.message(AnimeStates.waiting_for_search)
 async def process_anime_search(message: types.Message, state: FSMContext):
-    search_query = message.text
+    search_query = message.text.strip()  # Bo'sh joylarni olib tashlash
     
     async with async_session() as session:
+        # Anime nomini aniq tekshirish
         result = await session.execute(
-            select(Anime).where(Anime.title.ilike(f"%{search_query}%"))
+            select(Anime).where(Anime.title.ilike(f"{search_query}"))
         )
-        animes = result.scalars().all()
+        anime = result.scalar_one_or_none()
         
-        if not animes:
+        if not anime:
+            # Agar aniq nom topilmasa
             await message.answer(
-                "❌ Anime topilmadi!\n\n"
-                "Qayta urinib ko'ring yoki boshqa nom bilan qidiring.",
+                "❌ Bunday nomli anime mavjud emas!\n\n"
+                "Iltimos, anime nomini to'g'ri kiriting.",
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[[
                         InlineKeyboardButton(text="🔙 Orqaga", callback_data="search")
@@ -237,29 +309,57 @@ async def process_anime_search(message: types.Message, state: FSMContext):
                 )
             )
         else:
-            text = "🔍 Qidiruv natijalari:\n\n"
+            # Epizodlar sonini olish
+            episodes = await session.execute(
+                select(Episode).where(Episode.anime_id == anime.id).order_by(Episode.episode_number)
+            )
+            episodes = episodes.scalars().all()
+            
+            # Epizod tugmalarini yaratish
             keyboard = []
-            
-            for anime in animes:
-                text += f"🎬 {anime.title}\n"
-                text += f"🎭 Janr: {anime.genre}\n"
-                text += f"🔢 Kod: {anime.code}\n\n"
-                
-                keyboard.append([
+            row = []
+            for episode in episodes:
+                row.append(
                     InlineKeyboardButton(
-                        text=f"{anime.title}", 
-                        callback_data=f"anime_{anime.code}"
+                        text=f"📺 {episode.episode_number}-qism",
+                        callback_data=f"watch_{anime.code}_{episode.episode_number}"
                     )
-                ])
+                )
+                if len(row) == 2:  # 2 tadan qilib joylashtirish
+                    keyboard.append(row)
+                    row = []
             
+            if row:  # Qolgan tugmalarni qo'shish
+                keyboard.append(row)
+            
+            # Qo'shimcha tugmalar
+            keyboard.append([
+                InlineKeyboardButton(text="⬇️ Hammasini yuklash", callback_data=f"download_all_{anime.code}")
+            ])
             keyboard.append([
                 InlineKeyboardButton(text="🔙 Orqaga", callback_data="search")
             ])
             
-            await message.answer(
-                text,
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+            # Anime ma'lumotlarini yuborish
+            await message.answer_photo(
+                photo=anime.image_url,
+                caption=(
+                    f"📺 <b>{anime.title}</b>\n\n"
+                    f"📝 <i>{anime.description}</i>\n\n"
+                    f"🎭 Janr: {anime.genre}\n"
+                    f"🌍 Davlat: {anime.country}\n"
+                    f"🗣 Til: {anime.language}\n"
+                    f"🔢 Kod: <code>{anime.code}</code>\n"
+                    f"👁 Ko'rilgan: {anime.views:,} marta\n\n"
+                    f"📺 Mavjud qismlar soni: {len(episodes)} ta"
+                ),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+                parse_mode="HTML"
             )
+            
+            # Ko'rishlar sonini oshirish
+            anime.views += 1
+            await session.commit()
     
     await state.clear()
 
@@ -1113,4 +1213,50 @@ async def show_contact_admin(callback: types.CallbackQuery):
         ]
     )
     
-    await callback.message.edit_text(text, reply_markup=keyboard) 
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+async def check_subscription(user_id: int) -> bool:
+    """Foydalanuvchi kanallarga obuna bo'lganligini tekshirish"""
+    # Admin tekshirish
+    if str(user_id) in os.getenv("ADMINS", "").split(","):
+        return True
+        
+    async with async_session() as session:
+        # Barcha kanallarni olish
+        result = await session.execute(select(Channel))
+        channels = result.scalars().all()
+        
+        for channel in channels:
+            try:
+                member = await bot.get_chat_member(chat_id=channel.channel_id, user_id=user_id)
+                if member.status in ['left', 'kicked', 'banned']:
+                    return False
+            except Exception:
+                continue
+        return True
+
+async def get_channels_keyboard() -> InlineKeyboardMarkup:
+    """Obuna bo'lish uchun kanallar ro'yxatini qaytaradi"""
+    async with async_session() as session:
+        result = await session.execute(select(Channel))
+        channels = result.scalars().all()
+        
+        keyboard = []
+        for channel in channels:
+            keyboard.append([
+                InlineKeyboardButton(text=f"➕ {channel.channel_name}", url=f"https://t.me/{channel.channel_url[1:]}")
+            ])
+        
+        keyboard.append([
+            InlineKeyboardButton(text="✅ Tekshirish", callback_data="check_subscription")
+        ])
+        
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+@router.callback_query(F.data == "check_subscription")
+async def check_subscription_handler(callback: types.CallbackQuery):
+    if await check_subscription(callback.from_user.id):
+        await callback.message.delete()
+        await start_command(callback.message)
+    else:
+        await callback.answer("❌ Siz hali barcha kanallarga obuna bo'lmagansiz!", show_alert=True) 
